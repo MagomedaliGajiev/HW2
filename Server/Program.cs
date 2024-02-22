@@ -3,18 +3,15 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
 
-
-
-ServerObject server = new ServerObject();// создаем сервер
-await server.ListenAsync(); // запускаем сервер
-
 class ServerObject
 {
-    TcpListener tcpListener = new TcpListener(IPAddress.Any, 8888);
-    List<ClientObject> clients = new List<ClientObject>();
+    private TcpListener tcpListener = new TcpListener(IPAddress.Any, 8888);
+    private List<ClientObject> clients = new List<ClientObject>();
+    private CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
 
     protected internal void RemoveConnection(string id)
     {
@@ -26,18 +23,18 @@ class ServerObject
         }
     }
 
-    protected internal async Task ListenAsync()
+    protected internal async Task ListenAsync(CancellationToken cancellationToken)
     {
         try
         {
             tcpListener.Start();
             Console.WriteLine("Сервер запущен. Ожидание подключений...");
-            while (true)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 TcpClient tcpClient = await tcpListener.AcceptTcpClientAsync();
                 ClientObject clientObject = new ClientObject(tcpClient, this);
                 clients.Add(clientObject);
-                Task.Run(clientObject.ProcessAsync);
+                Task.Run(() => clientObject.ProcessAsync(cancellationToken));
             }
         }
         catch (Exception ex)
@@ -70,6 +67,11 @@ class ServerObject
         }
         tcpListener.Stop();
     }
+
+    public void Stop()
+    {
+        cancellationTokenSource.Cancel();
+    }
 }
 
 class ClientObject
@@ -77,8 +79,8 @@ class ClientObject
     protected internal string Id { get; } = Guid.NewGuid().ToString();
     protected internal StreamWriter Writer { get; }
     protected internal StreamReader Reader { get; }
-    TcpClient client;
-    ServerObject server;
+    private TcpClient client;
+    private ServerObject server;
 
     public ClientObject(TcpClient tcpClient, ServerObject serverObject)
     {
@@ -89,7 +91,7 @@ class ClientObject
         Writer = new StreamWriter(stream);
     }
 
-    public async Task ProcessAsync()
+    public async Task ProcessAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -97,12 +99,10 @@ class ClientObject
             string message = $"{userName} вошел в чат";
             await server.BroadcastMessageAsync(message, Id);
             Console.WriteLine(message);
-
-            while (true)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 string receivedMessage = await Reader.ReadLineAsync();
                 if (receivedMessage == null) continue;
-
                 if (receivedMessage.ToLower() == "exit")
                 {
                     message = $"{userName} покидает чат";
@@ -110,7 +110,6 @@ class ClientObject
                     await server.BroadcastMessageAsync(message, Id);
                     break;
                 }
-
                 message = $"{userName}: {receivedMessage}";
                 Console.WriteLine(message);
                 await server.BroadcastMessageAsync(message, Id);
@@ -131,5 +130,21 @@ class ClientObject
         Writer.Close();
         Reader.Close();
         client.Close();
+    }
+}
+
+class Program
+{
+    static async Task Main(string[] args)
+    {
+        ServerObject server = new ServerObject();
+        CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
+        Console.CancelKeyPress += (sender, e) =>
+        {
+            e.Cancel = true;
+            cancellationTokenSource.Cancel();
+        };
+
+        await server.ListenAsync(cancellationTokenSource.Token);
     }
 }
